@@ -29,7 +29,7 @@ class AbstractSocks(abc.ABC):
     @abc.abstractmethod
     def version(self):
         """
-        Curent instance socks version
+        Current instance socks version
         """
 
     def verify_version(self, version):
@@ -145,6 +145,59 @@ class BaseSocks5(AbstractSocks):
         return Socks5AddressType.domain, host
 
     def read_command(self):
+        """
+        Read a socks request or reply.
+
+        Requests are formed as follows:
+        +----+-----+-------+------+----------+----------+
+        |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
+        +----+-----+-------+------+----------+----------+
+        | 1  |  1  | X'00' |  1   | Variable |    2     |
+        +----+-----+-------+------+----------+----------+
+
+        Where:
+
+             -  VER    protocol version: X'05'
+             -  CMD
+                -  CONNECT X'01'
+                -  BIND X'02'
+                -  UDP ASSOCIATE X'03'
+             -  RSV    RESERVED
+             -  ATYP   address type of following address
+                -  IP V4 address: X'01'
+                -  DOMAINNAME: X'03'
+                -  IP V6 address: X'04'
+             -  DST.ADDR       desired destination address
+             -  DST.PORT desired destination port in network octet
+                order
+
+
+        Replies are formed as follows:
+        +----+-----+-------+------+----------+----------+
+        |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
+        +----+-----+-------+------+----------+----------+
+        | 1  |  1  | X'00' |  1   | Variable |    2     |
+        +----+-----+-------+------+----------+----------+
+
+        Where:
+
+          -  VER    protocol version: X'05'
+          -  REP    Reply field:
+             -  X'00' succeeded
+             -  X'01' general SOCKS server failure
+             -  X'02' connection not allowed by ruleset
+             -  X'03' Network unreachable
+             -  X'04' Host unreachable
+             -  X'05' Connection refused
+             -  X'06' TTL expired
+             -  X'07' Command not supported
+             -  X'08' Address type not supported
+             -  X'09' to X'FF' unassigned
+          -  RSV    RESERVED
+          -  ATYP   address type of following address
+
+        See: https://www.ietf.org/rfc/rfc1928.txt
+        """
         version, command, _, address_type = yield from self.io.read_struct("4B")
         self.verify_version(version)
         if address_type == Socks5AddressType.ipv4:
@@ -161,6 +214,11 @@ class BaseSocks5(AbstractSocks):
         return command, host, port
 
     def write_command(self, command, host="0.0.0.0", port=0):
+        """
+        Write a socks request or reply
+
+        See request format in `read_command` docstring
+        """
         address_type, address = self.resolve_address(host)
         yield from self.io.write_struct("4B", self.version, command, 0, address_type)
         if address_type == Socks5AddressType.ipv4:
@@ -175,6 +233,39 @@ class BaseSocks5(AbstractSocks):
 class Socks5Server(BaseSocks5):
 
     def auth(self, username, password):
+        """
+        Helper method to negotiate authentication with the client
+
+        Only username / password auth or no auth are supported.
+
+        The client connects to the server, and sends a version
+        identifier/method selection message:
+
+                        +----+----------+----------+
+                        |VER | NMETHODS | METHODS  |
+                        +----+----------+----------+
+                        | 1  |    1     | 1 to 255 |
+                        +----+----------+----------+
+
+        The VER field is set to X'05' for this version of the protocol.  The
+        NMETHODS field contains the number of method identifier octets that
+        appear in the METHODS field.
+
+        The server selects from one of the methods given in METHODS, and
+        sends a METHOD selection message:
+
+                              +----+--------+
+                              |VER | METHOD |
+                              +----+--------+
+                              | 1  |   1    |
+                              +----+--------+
+
+        Username / password authentication is then negotiated if required by
+        server and supported by client.
+
+        See https://tools.ietf.org/html/rfc1929 for the details of
+        username / password auth.
+        """
         auth_methods_count = yield from self.io.read_struct("B")
         auth_methods = yield from self.io.read_exactly(auth_methods_count)
         auth_required = username is not None
@@ -187,6 +278,8 @@ class Socks5Server(BaseSocks5):
         yield from self.io.write_struct("BB", self.version, auth_method)
         if auth_method == Socks5AuthMethod.no_acceptable:
             raise SocksException("No acceptible auth method")
+
+        # Do username/password authentication
         if auth_method == Socks5AuthMethod.username_password:
             auth_version = yield from self.io.read_struct("B")
             if auth_version != 1:
@@ -202,7 +295,9 @@ class Socks5Server(BaseSocks5):
     def run(self, username=None, password=None):
         version = yield from self.io.read_struct("B")
         self.verify_version(version)
+
         yield from self.auth(username, password)
+
         command, host, port = yield from self.read_command()
         if command != SocksCommand.tcp_connect:
             yield from self.write_command(Socks5Code.command_not_supported_or_protocol_error)
@@ -220,18 +315,24 @@ class Socks5Server(BaseSocks5):
 class Socks5Client(BaseSocks5):
 
     def auth(self, username, password):
+        """
+        Helper method to negotiate authentication with the server
+
+        See the docstring for Socks5Server.auth for protocol details.
+        """
         auth_required = username is not None
         if auth_required:
             auth_method = Socks5AuthMethod.username_password
         else:
             auth_method = Socks5AuthMethod.no_auth
         yield from self.io.write_struct("BB", 1, auth_method)
+
         version, code = yield from self.io.read_struct("BB")
         self.verify_version(version)
         if code != auth_method:
             raise SocksException(f"Auth method {_hex(auth_method)} not accepted with {_hex(code)} code")
         if auth_method == Socks5AuthMethod.username_password:
-            yield from self.io.write_struct("B", 1)
+            yield from self.io.write_struct("B", 1)  # username / password auth version 1
             yield from self.io.write_pascal_string(username)
             yield from self.io.write_pascal_string(password)
             auth_version, code = yield from self.io.read_struct("BB")
@@ -241,6 +342,12 @@ class Socks5Client(BaseSocks5):
                 raise SocksException(f"Username/password auth failed with code {_hex(code)}")
 
     def run(self, host, port, username=None, password=None):
+        """
+        Entrypoint for the socks5 client
+
+        Negotiate authentication with the server and then drop to pass-through
+        to transmit the client's request payload.
+        """
         yield from self.io.write_struct("B", self.version)
         yield from self.auth(username, password)
         yield from self.write_command(SocksCommand.tcp_connect, host, port)
