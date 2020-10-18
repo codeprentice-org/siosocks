@@ -10,3 +10,8 @@ dependencies:
 test *args:
     python -m pytest {{args}}
 
+code:
+    code .
+
+pycharm:
+    pyCharm .

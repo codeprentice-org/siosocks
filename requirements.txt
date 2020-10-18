@@ -3,3 +3,4 @@ pytest-cov
 pytest-asyncio
 trio
 pytest-trio
+twisted
