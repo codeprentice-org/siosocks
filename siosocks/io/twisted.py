@@ -1,9 +1,12 @@
 import asyncio
 import logging
-from asyncio import Future, StreamReader, StreamWriter
+from asyncio import Future
 from typing import List, Optional, Tuple, Union
 
+from twisted.internet.defer import ensureDeferred, Deferred
 from twisted.internet.protocol import Protocol
+from twisted.internet.interfaces import IStreamClientEndpoint
+from twisted.internet.endpoints import connectProtocol
 
 from .const import DEFAULT_BLOCK_SIZE
 from ..exceptions import SocksException
@@ -46,47 +49,35 @@ class ClientIO(Protocol, AbstractSocksIO):
         return
 
 
-async def open_connection(
+def open_connection(
+        endpoint: IStreamClientEndpoint,
         host: str,
         port: int,
-        socks_host: Optional[str] = None,
-        socks_port: Optional[int] = None,
-        socks_version: Optional[int] = None,
+        socks_version: int,
         username: Optional[Union[bytes, str]] = None,
         password: Optional[Union[bytes, str]] = None,
         encoding: Optional[str] = DEFAULT_ENCODING,
         socks4_extras=None,
         socks5_extras=None,
-        **open_connection_extras,
-) -> Tuple[StreamReader, StreamWriter]:
+) -> Deferred[ClientIO]:
     if socks4_extras is None:
         socks4_extras = {}
     if socks5_extras is None:
         socks5_extras = {}
-    socks_required = socks_host, socks_port, socks_version
-    socks_enabled = all(socks_required)
-    socks_disabled = not any(socks_required)
-    if socks_enabled == socks_disabled:
-        raise SocksException("Partly passed socks required arguments: "
-                             "socks_host = {!r}, socks_port = {!r}, socks_version = {!r}".format(*socks_required))
-    if socks_enabled:
-        reader, writer = await asyncio.open_connection(
-                host=socks_host,
-                port=socks_port,
-                **open_connection_extras,
-        )
-        protocol = SocksClient(
-                host=host,
-                port=port,
-                version=socks_version,
-                username=username,
-                password=password,
-                encoding=encoding,
-                socks4_extras=socks4_extras,
-                socks5_extras=socks5_extras,
-        )
-        io = ClientIO(reader=reader, writer=writer)
-        await async_engine(protocol=protocol, io=io)
-    else:
-        reader, writer = await asyncio.open_connection(host=host, port=port, **open_connection_extras)
-    return reader, writer
+
+    protocol = SocksClient(
+            host=host,
+            port=port,
+            version=socks_version,
+            username=username,
+            password=password,
+            encoding=encoding,
+            socks4_extras=socks4_extras,
+            socks5_extras=socks5_extras,
+    )
+    client_io = ClientIO()
+    io_deferred = connectProtocol(endpoint, client_io)
+    io_deferred.addCallback(ensureDeferred(async_engine(protocol=protocol, io=client_io)))
+    return io_deferred
+
+    # await async_engine(protocol=protocol, io=io)
