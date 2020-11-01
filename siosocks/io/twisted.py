@@ -1,7 +1,9 @@
 import asyncio
 import logging
-from asyncio import StreamReader, StreamWriter
-from typing import Optional, Tuple, Union
+from asyncio import Future, StreamReader, StreamWriter
+from typing import List, Optional, Tuple, Union
+
+from twisted.internet.protocol import Protocol
 
 from .const import DEFAULT_BLOCK_SIZE
 from ..exceptions import SocksException
@@ -11,18 +13,31 @@ from ..protocol import DEFAULT_ENCODING, SocksClient
 logger = logging.getLogger(__name__)
 
 
-class ClientIO(AbstractSocksIO):
+class ClientIO(Protocol, AbstractSocksIO):
     
-    def __init__(self, reader: StreamReader, writer: StreamWriter):
-        self.reader = reader
-        self.writer = writer
+    chunks: List[bytes]
+    future: Future[None]
     
+    def __init__(self):
+        self.buffer = bytearray()
+        self.future = asyncio.get_running_loop().create_future()
+
+    def dataReceived(self, data: bytes):
+        self.chunks.append(data)
+        if self.future.done():
+            return
+        self.future.set_result(None)
+        self.future = asyncio.get_running_loop().create_future()
+
     async def read(self) -> bytes:
-        return await self.reader.read(DEFAULT_BLOCK_SIZE)
+        if not self.chunks:
+            await self.future
+        data = b"".join(self.chunks)
+        self.chunks = []
+        return data
     
     async def write(self, data: bytes):
-        self.writer.write(data)
-        await self.writer.drain()
+        self.transport.write(data)
     
     async def connect(self, host: int, port: int):
         raise RuntimeError("ClientIO.connect should not be called")
