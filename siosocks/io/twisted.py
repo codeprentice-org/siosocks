@@ -19,7 +19,7 @@ class ClientIO(Protocol, AbstractSocksIO):
     future: Future[None]
     
     def __init__(self):
-        self.buffer = bytearray()
+        self.chunks = []
         self.future = asyncio.get_running_loop().create_future()
 
     def dataReceived(self, data: bytes):
@@ -33,7 +33,7 @@ class ClientIO(Protocol, AbstractSocksIO):
         if not self.chunks:
             await self.future
         data = b"".join(self.chunks)
-        self.chunks = []
+        self.chunks.clear()
         return data
     
     async def write(self, data: bytes):
